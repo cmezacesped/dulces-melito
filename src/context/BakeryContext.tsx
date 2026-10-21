@@ -93,6 +93,7 @@ export function BakeryProvider({ children }: { children: React.ReactNode }) {
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
   const isCloudReadyRef = useRef(false);
   const shouldPushToCloudRef = useRef(false);
+  const lastRemoteUpdatedAtRef = useRef<string | null>(null);
 
   // Función auxiliar para actualizar el estado marcando que fue un cambio real del usuario
   const updateStateAndSync = useCallback(
@@ -103,8 +104,11 @@ export function BakeryProvider({ children }: { children: React.ReactNode }) {
     []
   );
 
-  // Cargar estado inicial desde Supabase (la nube es la fuente de la verdad al abrir la app)
-  const refreshFromCloud = useCallback(async () => {
+  // Cargar estado desde Supabase (si solo revisa cambios nuevos, solo actualiza si la nube tiene una versión más reciente)
+  const refreshFromCloud = useCallback(async (onlyIfNewer = false) => {
+    // Si el usuario está a mitad de guardar un cambio local, no pisarlo
+    if (onlyIfNewer && shouldPushToCloudRef.current) return;
+
     const { client, workspaceKey } = getSupabaseClient();
     if (!client) {
       isCloudReadyRef.current = true;
@@ -112,7 +116,10 @@ export function BakeryProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
-    setSyncStatus('syncing');
+    if (!onlyIfNewer) {
+      setSyncStatus('syncing');
+    }
+
     try {
       const { data, error } = await client
         .from('bakery_workspace')
@@ -127,6 +134,14 @@ export function BakeryProvider({ children }: { children: React.ReactNode }) {
       }
 
       if (data && data.state) {
+        if (
+          onlyIfNewer &&
+          lastRemoteUpdatedAtRef.current &&
+          data.updated_at === lastRemoteUpdatedAtRef.current
+        ) {
+          return;
+        }
+
         const remoteState = data.state as BakeryState;
         const normalizedRemote: BakeryState = {
           supplies: remoteState.supplies || [],
@@ -141,6 +156,7 @@ export function BakeryProvider({ children }: { children: React.ReactNode }) {
           accessPin: remoteState.accessPin || '',
         };
         shouldPushToCloudRef.current = false;
+        lastRemoteUpdatedAtRef.current = data.updated_at || null;
         setState(normalizedRemote);
         localStorage.setItem(
           LOCAL_STORAGE_KEY,
@@ -180,15 +196,36 @@ export function BakeryProvider({ children }: { children: React.ReactNode }) {
         // ignore parse errors
       }
 
-      await refreshFromCloud();
+      await refreshFromCloud(false);
       if (mounted) {
         setIsLoaded(true);
       }
     }
 
     init();
+
+    // Sincronizar automáticamente cuando vuelve a la pestaña del PC o abre el celular
+    const handleVisibilityOrFocus = () => {
+      if (document.visibilityState === 'visible') {
+        refreshFromCloud(true);
+      }
+    };
+
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+
+    // Revisar cada 10 segundos si el otro dispositivo guardó algún cambio nuevo
+    const interval = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        refreshFromCloud(true);
+      }
+    }, 10000);
+
     return () => {
       mounted = false;
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+      clearInterval(interval);
     };
   }, [refreshFromCloud]);
 
@@ -227,6 +264,7 @@ export function BakeryProvider({ children }: { children: React.ReactNode }) {
           setSyncStatus('error');
         } else {
           shouldPushToCloudRef.current = false;
+          lastRemoteUpdatedAtRef.current = now;
           setSyncStatus('synced');
           setLastSyncedAt(now);
         }
