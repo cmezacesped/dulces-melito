@@ -8,10 +8,21 @@ export interface CloudConfig {
 
 const CLOUD_CONFIG_STORAGE_KEY = 'pasteleria_cloud_config_v1';
 
+const DEFAULT_SUPABASE_URL = 'https://jsujoejhsoeghfogzwkj.supabase.co';
+const DEFAULT_SUPABASE_ANON_KEY =
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpzdWpvZWpoc29lZ2hmb2d6d2tqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI1NTE4ODUsImV4cCI6MjEwODEyNzg4NX0.WGVMJ-WT3SzBc9m5H6aqU0fJ9mnARtdzuoJnBL2sm80';
+const DEFAULT_WORKSPACE_KEY = 'dulces-melito-principal';
+
+function normalizeSupabaseUrl(url: string): string {
+  return url.trim().replace(/\/rest\/v1\/?$/i, '').replace(/\/+$/, '');
+}
+
 export function getSavedCloudConfig(): CloudConfig | null {
-  const envUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const envKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  const envWorkspace = process.env.NEXT_PUBLIC_WORKSPACE_KEY || 'pasteleria-principal';
+  const envUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || DEFAULT_SUPABASE_URL;
+  const envKey =
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || DEFAULT_SUPABASE_ANON_KEY;
+  const envWorkspace =
+    process.env.NEXT_PUBLIC_WORKSPACE_KEY || DEFAULT_WORKSPACE_KEY;
 
   if (typeof window !== 'undefined') {
     try {
@@ -19,7 +30,10 @@ export function getSavedCloudConfig(): CloudConfig | null {
       if (raw) {
         const parsed = JSON.parse(raw) as CloudConfig;
         if (parsed.supabaseUrl && parsed.supabaseAnonKey) {
-          return parsed;
+          return {
+            ...parsed,
+            supabaseUrl: normalizeSupabaseUrl(parsed.supabaseUrl),
+          };
         }
       }
     } catch {
@@ -29,8 +43,8 @@ export function getSavedCloudConfig(): CloudConfig | null {
 
   if (envUrl && envKey) {
     return {
-      supabaseUrl: envUrl,
-      supabaseAnonKey: envKey,
+      supabaseUrl: normalizeSupabaseUrl(envUrl),
+      supabaseAnonKey: envKey.trim(),
       workspaceKey: envWorkspace,
     };
   }

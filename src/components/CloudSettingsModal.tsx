@@ -31,19 +31,20 @@ export default function CloudSettingsModal({ isOpen, onClose }: Props) {
     syncStatus,
     setAccessPin,
     importFullState,
+    clearAllData,
     refreshFromCloud,
   } = useBakery();
   const { showToast, confirmAction } = useFeedback();
 
   const existingCloud = getSavedCloudConfig();
   const [supabaseUrl, setSupabaseUrl] = useState(
-    existingCloud?.supabaseUrl || ''
+    existingCloud?.supabaseUrl || 'https://jsujoejhsoeghfogzwkj.supabase.co'
   );
   const [supabaseAnonKey, setSupabaseAnonKey] = useState(
     existingCloud?.supabaseAnonKey || ''
   );
   const [workspaceKey, setWorkspaceKey] = useState(
-    existingCloud?.workspaceKey || 'pasteleria-privada'
+    existingCloud?.workspaceKey || 'dulces-melito-principal'
   );
   const [pinInput, setPinInput] = useState(state.accessPin || '');
   const [copiedSql, setCopiedSql] = useState(false);
@@ -305,6 +306,31 @@ export default function CloudSettingsModal({ isOpen, onClose }: Props) {
                   className="hidden"
                 />
               </label>
+
+              <button
+                type="button"
+                onClick={async () => {
+                  const ok = await confirmAction({
+                    title: 'Limpiar Todos los Datos (Reiniciar en Blanco)',
+                    message:
+                      '¿Deseas borrar los datos de prueba actuales para dejar Dulces Melito 100% en blanco? (Tu clave privada se mantendrá).',
+                    confirmLabel: 'Sí, Dejar en Blanco',
+                    variant: 'danger',
+                  });
+                  if (ok) {
+                    const currentPin = state.accessPin || '';
+                    clearAllData();
+                    if (currentPin) setAccessPin(currentPin);
+                    showToast(
+                      'Sistema reiniciado en blanco',
+                      'Se borraron los datos de prueba. Ya pueden cargar los datos reales.'
+                    );
+                  }
+                }}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs font-semibold hover:bg-red-100"
+              >
+                Limpiar Datos de Prueba
+              </button>
             </div>
           </div>
         </div>
