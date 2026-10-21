@@ -91,12 +91,23 @@ export function BakeryProvider({ children }: { children: React.ReactNode }) {
   const [isLoaded, setIsLoaded] = useState(false);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('local');
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
-  const isApplyingRemoteRef = useRef(false);
+  const isCloudReadyRef = useRef(false);
+  const shouldPushToCloudRef = useRef(false);
 
-  // Cargar estado inicial desde localStorage y luego desde Supabase si está configurado
+  // Función auxiliar para actualizar el estado marcando que fue un cambio real del usuario
+  const updateStateAndSync = useCallback(
+    (updater: BakeryState | ((prev: BakeryState) => BakeryState)) => {
+      shouldPushToCloudRef.current = true;
+      setState(updater);
+    },
+    []
+  );
+
+  // Cargar estado inicial desde Supabase (la nube es la fuente de la verdad al abrir la app)
   const refreshFromCloud = useCallback(async () => {
     const { client, workspaceKey } = getSupabaseClient();
     if (!client) {
+      isCloudReadyRef.current = true;
       setSyncStatus('local');
       return;
     }
@@ -110,14 +121,14 @@ export function BakeryProvider({ children }: { children: React.ReactNode }) {
         .maybeSingle();
 
       if (error) {
+        isCloudReadyRef.current = true;
         setSyncStatus('error');
         return;
       }
 
       if (data && data.state) {
-        isApplyingRemoteRef.current = true;
         const remoteState = data.state as BakeryState;
-        setState({
+        const normalizedRemote: BakeryState = {
           supplies: remoteState.supplies || [],
           recipes: remoteState.recipes || [],
           boxes: remoteState.boxes || [],
@@ -128,47 +139,60 @@ export function BakeryProvider({ children }: { children: React.ReactNode }) {
               ? remoteState.recipeLines
               : INITIAL_EMPTY_STATE.recipeLines,
           accessPin: remoteState.accessPin || '',
-        });
-        localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(remoteState));
+        };
+        shouldPushToCloudRef.current = false;
+        setState(normalizedRemote);
+        localStorage.setItem(
+          LOCAL_STORAGE_KEY,
+          JSON.stringify(normalizedRemote)
+        );
         setLastSyncedAt(data.updated_at || new Date().toISOString());
-        setTimeout(() => {
-          isApplyingRemoteRef.current = false;
-        }, 100);
       }
+      isCloudReadyRef.current = true;
       setSyncStatus('synced');
     } catch {
+      isCloudReadyRef.current = true;
       setSyncStatus('error');
     }
   }, []);
 
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved) as Partial<BakeryState>;
-        setState({
-          supplies: parsed.supplies || [],
-          recipes: parsed.recipes || [],
-          boxes: parsed.boxes || [],
-          orders: parsed.orders || [],
-          expenses: parsed.expenses || [],
-          recipeLines:
-            parsed.recipeLines && parsed.recipeLines.length > 0
-              ? parsed.recipeLines
-              : INITIAL_EMPTY_STATE.recipeLines,
-          accessPin: parsed.accessPin || '',
-        });
+    let mounted = true;
+    async function init() {
+      try {
+        const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
+        if (saved) {
+          const parsed = JSON.parse(saved) as Partial<BakeryState>;
+          setState({
+            supplies: parsed.supplies || [],
+            recipes: parsed.recipes || [],
+            boxes: parsed.boxes || [],
+            orders: parsed.orders || [],
+            expenses: parsed.expenses || [],
+            recipeLines:
+              parsed.recipeLines && parsed.recipeLines.length > 0
+                ? parsed.recipeLines
+                : INITIAL_EMPTY_STATE.recipeLines,
+            accessPin: parsed.accessPin || '',
+          });
+        }
+      } catch {
+        // ignore parse errors
       }
-    } catch {
-      // ignore parse errors
-    } finally {
-      setIsLoaded(true);
+
+      await refreshFromCloud();
+      if (mounted) {
+        setIsLoaded(true);
+      }
     }
 
-    refreshFromCloud();
+    init();
+    return () => {
+      mounted = false;
+    };
   }, [refreshFromCloud]);
 
-  // Guardar automáticamente en localStorage y sincronizar con Supabase cuando cambia el estado
+  // Guardar automáticamente en localStorage y sincronizar con Supabase SOLO cuando el usuario hace un cambio
   useEffect(() => {
     if (!isLoaded) return;
 
@@ -178,7 +202,7 @@ export function BakeryProvider({ children }: { children: React.ReactNode }) {
       // ignore quota errors
     }
 
-    if (isApplyingRemoteRef.current) return;
+    if (!isCloudReadyRef.current || !shouldPushToCloudRef.current) return;
 
     const { client, workspaceKey } = getSupabaseClient();
     if (!client) {
@@ -202,13 +226,14 @@ export function BakeryProvider({ children }: { children: React.ReactNode }) {
         if (error) {
           setSyncStatus('error');
         } else {
+          shouldPushToCloudRef.current = false;
           setSyncStatus('synced');
           setLastSyncedAt(now);
         }
       } catch {
         setSyncStatus('error');
       }
-    }, 600);
+    }, 400);
 
     return () => clearTimeout(timer);
   }, [state, isLoaded]);
@@ -220,28 +245,28 @@ export function BakeryProvider({ children }: { children: React.ReactNode }) {
       id: generateId('sup'),
       updatedAt: new Date().toISOString(),
     };
-    setState((prev) => ({
+    updateStateAndSync((prev) => ({
       ...prev,
       supplies: [...prev.supplies, newItem],
     }));
     return newItem;
-  }, []);
+  }, [updateStateAndSync]);
 
   const updateSupply = useCallback((id: string, item: Partial<SupplyItem>) => {
-    setState((prev) => ({
+    updateStateAndSync((prev) => ({
       ...prev,
       supplies: prev.supplies.map((s) =>
         s.id === id ? { ...s, ...item, updatedAt: new Date().toISOString() } : s
       ),
     }));
-  }, []);
+  }, [updateStateAndSync]);
 
   const deleteSupply = useCallback((id: string) => {
-    setState((prev) => ({
+    updateStateAndSync((prev) => ({
       ...prev,
       supplies: prev.supplies.filter((s) => s.id !== id),
     }));
-  }, []);
+  }, [updateStateAndSync]);
 
   const registerSupplyPurchase = useCallback(
     (
@@ -250,7 +275,7 @@ export function BakeryProvider({ children }: { children: React.ReactNode }) {
       newPurchaseQuantity: number,
       newPurchaseCost: number
     ) => {
-      setState((prev) => {
+      updateStateAndSync((prev) => {
         const target = prev.supplies.find((s) => s.id === id);
         const todayStr = new Date().toISOString().slice(0, 10);
         const newExpenses = [...(prev.expenses || [])];
@@ -292,11 +317,11 @@ export function BakeryProvider({ children }: { children: React.ReactNode }) {
         };
       });
     },
-    []
+    [updateStateAndSync]
   );
 
   const adjustSupplyStock = useCallback((id: string, delta: number) => {
-    setState((prev) => ({
+    updateStateAndSync((prev) => ({
       ...prev,
       supplies: prev.supplies.map((s) =>
         s.id === id
@@ -308,7 +333,7 @@ export function BakeryProvider({ children }: { children: React.ReactNode }) {
           : s
       ),
     }));
-  }, []);
+  }, [updateStateAndSync]);
 
   // Acciones de Recetas y Sub-recetas
   const addRecipe = useCallback((recipe: Omit<Recipe, 'id' | 'updatedAt'>) => {
@@ -317,28 +342,28 @@ export function BakeryProvider({ children }: { children: React.ReactNode }) {
       id: generateId('rec'),
       updatedAt: new Date().toISOString(),
     };
-    setState((prev) => ({
+    updateStateAndSync((prev) => ({
       ...prev,
       recipes: [...prev.recipes, newRecipe],
     }));
     return newRecipe;
-  }, []);
+  }, [updateStateAndSync]);
 
   const updateRecipe = useCallback((id: string, recipe: Partial<Recipe>) => {
-    setState((prev) => ({
+    updateStateAndSync((prev) => ({
       ...prev,
       recipes: prev.recipes.map((r) =>
         r.id === id ? { ...r, ...recipe, updatedAt: new Date().toISOString() } : r
       ),
     }));
-  }, []);
+  }, [updateStateAndSync]);
 
   const deleteRecipe = useCallback((id: string) => {
-    setState((prev) => ({
+    updateStateAndSync((prev) => ({
       ...prev,
       recipes: prev.recipes.filter((r) => r.id !== id),
     }));
-  }, []);
+  }, [updateStateAndSync]);
 
   const duplicateRecipe = useCallback(
     (id: string, newName?: string, newLine?: string): Recipe | null => {
@@ -357,17 +382,17 @@ export function BakeryProvider({ children }: { children: React.ReactNode }) {
         updatedAt: new Date().toISOString(),
       };
 
-      setState((prev) => ({
+      updateStateAndSync((prev) => ({
         ...prev,
         recipes: [...prev.recipes, copy],
       }));
       return copy;
     },
-    [state.recipes]
+    [state.recipes, updateStateAndSync]
   );
 
   const bakeRecipeBatch = useCallback((recipeId: string, unitsToBake: number) => {
-    setState((prev) => {
+    updateStateAndSync((prev) => {
       const recipe = prev.recipes.find((r) => r.id === recipeId);
       if (!recipe || unitsToBake <= 0) return prev;
 
@@ -395,26 +420,26 @@ export function BakeryProvider({ children }: { children: React.ReactNode }) {
         supplies: updatedSupplies,
       };
     });
-  }, []);
+  }, [updateStateAndSync]);
 
   const addRecipeCategoryLine = useCallback((lineName: string) => {
     const clean = lineName.trim();
     if (!clean) return;
-    setState((prev) => {
+    updateStateAndSync((prev) => {
       if (prev.recipeLines.includes(clean)) return prev;
       return {
         ...prev,
         recipeLines: [...prev.recipeLines, clean],
       };
     });
-  }, []);
+  }, [updateStateAndSync]);
 
   const removeRecipeCategoryLine = useCallback((lineName: string) => {
-    setState((prev) => ({
+    updateStateAndSync((prev) => ({
       ...prev,
       recipeLines: prev.recipeLines.filter((l) => l !== lineName),
     }));
-  }, []);
+  }, [updateStateAndSync]);
 
   // Acciones de Cajas / Productos Armados
   const addBox = useCallback((box: Omit<ProductBox, 'id' | 'updatedAt'>) => {
@@ -423,28 +448,28 @@ export function BakeryProvider({ children }: { children: React.ReactNode }) {
       id: generateId('box'),
       updatedAt: new Date().toISOString(),
     };
-    setState((prev) => ({
+    updateStateAndSync((prev) => ({
       ...prev,
       boxes: [...prev.boxes, newBox],
     }));
     return newBox;
-  }, []);
+  }, [updateStateAndSync]);
 
   const updateBox = useCallback((id: string, box: Partial<ProductBox>) => {
-    setState((prev) => ({
+    updateStateAndSync((prev) => ({
       ...prev,
       boxes: prev.boxes.map((b) =>
         b.id === id ? { ...b, ...box, updatedAt: new Date().toISOString() } : b
       ),
     }));
-  }, []);
+  }, [updateStateAndSync]);
 
   const deleteBox = useCallback((id: string) => {
-    setState((prev) => ({
+    updateStateAndSync((prev) => ({
       ...prev,
       boxes: prev.boxes.filter((b) => b.id !== id),
     }));
-  }, []);
+  }, [updateStateAndSync]);
 
   // Acciones de Pedidos / Calendario
   const addOrder = useCallback((order: Omit<CustomerOrder, 'id' | 'createdAt'>) => {
@@ -453,30 +478,30 @@ export function BakeryProvider({ children }: { children: React.ReactNode }) {
       id: generateId('ord'),
       createdAt: new Date().toISOString(),
     };
-    setState((prev) => ({
+    updateStateAndSync((prev) => ({
       ...prev,
       orders: [...prev.orders, newOrder],
     }));
     return newOrder;
-  }, []);
+  }, [updateStateAndSync]);
 
   const updateOrder = useCallback((id: string, order: Partial<CustomerOrder>) => {
-    setState((prev) => ({
+    updateStateAndSync((prev) => ({
       ...prev,
       orders: prev.orders.map((o) => (o.id === id ? { ...o, ...order } : o)),
     }));
-  }, []);
+  }, [updateStateAndSync]);
 
   const deleteOrder = useCallback((id: string) => {
-    setState((prev) => ({
+    updateStateAndSync((prev) => ({
       ...prev,
       orders: prev.orders.filter((o) => o.id !== id),
     }));
-  }, []);
+  }, [updateStateAndSync]);
 
   const deductOrderStock = useCallback((orderId: string): boolean => {
     let didDeduct = false;
-    setState((prev) => {
+    updateStateAndSync((prev) => {
       const targetOrder = prev.orders.find((o) => o.id === orderId);
       if (!targetOrder || targetOrder.stockDeducted) return prev;
 
@@ -516,11 +541,11 @@ export function BakeryProvider({ children }: { children: React.ReactNode }) {
       };
     });
     return didDeduct;
-  }, []);
+  }, [updateStateAndSync]);
 
   const deductMultipleOrdersStock = useCallback((orderIds: string[]): number => {
     let deductedCount = 0;
-    setState((prev) => {
+    updateStateAndSync((prev) => {
       const targetOrders = prev.orders.filter(
         (o) =>
           orderIds.includes(o.id) &&
@@ -569,36 +594,36 @@ export function BakeryProvider({ children }: { children: React.ReactNode }) {
       };
     });
     return deductedCount;
-  }, []);
+  }, [updateStateAndSync]);
 
   const addExpense = useCallback((expense: Omit<ExpenseRecord, 'id'>) => {
     const newExp: ExpenseRecord = {
       ...expense,
       id: generateId('exp'),
     };
-    setState((prev) => ({
+    updateStateAndSync((prev) => ({
       ...prev,
       expenses: [newExp, ...(prev.expenses || [])],
     }));
     return newExp;
-  }, []);
+  }, [updateStateAndSync]);
 
   const deleteExpense = useCallback((id: string) => {
-    setState((prev) => ({
+    updateStateAndSync((prev) => ({
       ...prev,
       expenses: (prev.expenses || []).filter((e) => e.id !== id),
     }));
-  }, []);
+  }, [updateStateAndSync]);
 
   const setAccessPin = useCallback((pin: string) => {
-    setState((prev) => ({
+    updateStateAndSync((prev) => ({
       ...prev,
       accessPin: pin.trim(),
     }));
-  }, []);
+  }, [updateStateAndSync]);
 
   const importFullState = useCallback((newState: BakeryState) => {
-    setState({
+    updateStateAndSync({
       supplies: newState.supplies || [],
       recipes: newState.recipes || [],
       boxes: newState.boxes || [],
@@ -610,11 +635,11 @@ export function BakeryProvider({ children }: { children: React.ReactNode }) {
           : INITIAL_EMPTY_STATE.recipeLines,
       accessPin: newState.accessPin || '',
     });
-  }, []);
+  }, [updateStateAndSync]);
 
   const clearAllData = useCallback(() => {
-    setState(INITIAL_EMPTY_STATE);
-  }, []);
+    updateStateAndSync(INITIAL_EMPTY_STATE);
+  }, [updateStateAndSync]);
 
   return (
     <BakeryContext.Provider
